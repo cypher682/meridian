@@ -30,6 +30,10 @@ curl http://localhost:8083/actuator/health
 The database is published on port `5436`. Flyway applies the schema and synthetic
 seed data on first start. `make down` stops the stack and deletes local data.
 
+The compose file uses local-only demo database credentials. Set
+`POSTGRES_PASSWORD` to override the default before exposing the stack beyond
+localhost.
+
 ## API
 
 `X-Facility-ID` and `X-Actor-ID` default to the seeded demo facility and
