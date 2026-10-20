@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A small clinic workspace for patient check-in, lab orders, results, and an auditable record.">
+  <title>Meridian Clinic</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">M</span>
+      <span class="brand-name">Meridian</span>
+      <span class="brand-sub">Clinic records</span>
+    </div>
+    <div class="session">
+      <label for="actor">Acting as</label>
+      <input id="actor" name="actor" value="demo-user" autocomplete="off" spellcheck="false">
+      <span id="connection" class="connection" data-state="checking">Checking</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="rail" aria-label="Workspace">
+      <p class="rail-label">Workflow</p>
+      <button class="nav-item is-active" type="button" data-view="front">
+        <span class="step">01</span>
+        <span>Front desk</span>
+      </button>
+      <button class="nav-item" type="button" data-view="clinician">
+        <span class="step">02</span>
+        <span>Clinician</span>
+      </button>
+      <button class="nav-item" type="button" data-view="lab">
+        <span class="step">03</span>
+        <span>Laboratory</span>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="nav-item" type="button" data-view="audit">
+        <span class="step">A</span>
+        <span>Audit log</span>
+      </button>
+    </nav>
+
+    <main class="main">
+      <section id="view-front" class="view is-active" aria-labelledby="front-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Reception</p>
+            <h1 id="front-title">Check in a patient</h1>
+            <p class="view-intro">Find an existing chart or register someone new. Encounters and lab orders stay attached to the patient record.</p>
+          </div>
+          <time id="today" class="view-date"></time>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Find a chart</h2>
+              <span id="search-count" class="count"></span>
+            </div>
+            <form id="search-form" class="inline-form">
+              <label class="sr-only" for="search-q">Search patients</label>
+              <input id="search-q" name="q" placeholder="Name or phone" autocomplete="off">
+              <button class="btn" type="submit">Search</button>
+            </form>
+            <div id="patient-results" class="result-list">
+              <p class="empty">Search by name or phone to open a chart.</p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Register a patient</h2>
+            </div>
+            <form id="register-form" class="form-grid">
+              <label>Given name
+                <input name="givenName" required autocomplete="given-name">
+              </label>
+              <label>Family name
+                <input name="familyName" required autocomplete="family-name">
+              </label>
+              <label>Date of birth
+                <input name="dateOfBirth" type="date" required>
+              </label>
+              <label>Phone
+                <input name="phone" type="tel" autocomplete="tel">
+              </label>
+              <div class="form-actions">
+                <button class="btn" type="submit">Register patient</button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <section id="chart-panel" class="panel chart-panel is-hidden">
+          <div class="chart-head">
+            <div>
+              <p class="chart-label">Open chart</p>
+              <h2 id="chart-name"></h2>
+              <p id="chart-meta" class="chart-meta"></p>
+            </div>
+            <button id="chart-clear" class="btn btn-quiet" type="button">Close chart</button>
+          </div>
+
+          <div class="chart-grid">
+            <div>
+              <h3>Encounters</h3>
+              <div id="encounter-list" class="result-list">
+                <p class="empty">No encounters yet.</p>
+              </div>
+            </div>
+
+            <form id="encounter-form" class="panel-inset">
+              <h3>Start an encounter</h3>
+              <label>Clinician
+                <input name="clinicianId" id="enc-clinician" required autocomplete="off">
+              </label>
+              <label>Notes
+                <textarea name="notes" rows="3" placeholder="Reason for visit"></textarea>
+              </label>
+              <div class="vitals-grid">
+                <label>Temp °C
+                  <input name="temperatureC" inputmode="decimal" placeholder="36.8">
+                </label>
+                <label>Heart rate
+                  <input name="heartRate" inputmode="numeric" placeholder="72">
+                </label>
+                <label>Blood pressure
+                  <input name="bloodPressure" placeholder="120/80">
+                </label>
+              </div>
+              <div class="form-actions">
+                <button class="btn" type="submit">Create encounter</button>
+              </div>
+            </form>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-clinician" class="view" aria-labelledby="clinician-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Care team</p>
+            <h1 id="clinician-title">Order a lab test</h1>
+            <p class="view-intro">Work from the open chart. Pick an encounter, then send a test to the lab queue.</p>
+          </div>
+        </div>
+
+        <div id="clinician-empty" class="empty-state">
+          <h2>No open chart</h2>
+          <p>Open a patient chart at the front desk first.</p>
+          <button class="btn btn-secondary" type="button" data-go="front">Go to front desk</button>
+        </div>
+
+        <div id="clinician-workspace" class="is-hidden">
+          <div class="patient-strip">
+            <div>
+              <p class="chart-label">Patient</p>
+              <h2 id="clinician-patient-name"></h2>
+              <p id="clinician-patient-meta" class="chart-meta"></p>
+            </div>
+            <button class="btn btn-quiet" type="button" data-go="front">Change patient</button>
+          </div>
+
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Select an encounter</h2>
+              </div>
+              <div id="clinician-encounters" class="result-list">
+                <p class="empty">No encounters for this patient.</p>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>New lab order</h2>
+              </div>
+              <form id="order-form" class="form-stack">
+                <label>Test
+                  <select name="testCode" required>
+                    <option value="CBC">Complete blood count (CBC)</option>
+                    <option value="BMP">Basic metabolic panel (BMP)</option>
+                    <option value="A1C">Hemoglobin A1c</option>
+                    <option value="LIPID">Lipid panel</option>
+                    <option value="TSH">Thyroid stimulating hormone</option>
+                    <option value="CRP">C-reactive protein</option>
+                  </select>
+                </label>
+                <p id="order-encounter" class="form-note">Select an encounter first.</p>
+                <div class="form-actions">
+                  <button class="btn" type="submit" disabled>Send to laboratory</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Lab orders for this patient</h2>
+            </div>
+            <div id="patient-orders" class="result-list">
+              <p class="empty">No lab orders yet.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-lab" class="view" aria-labelledby="lab-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Laboratory</p>
+            <h1 id="lab-title">Lab queue</h1>
+            <p class="view-intro">Collect samples, record values, and release results. Every step is written to the audit chain.</p>
+          </div>
+          <button id="lab-refresh" class="btn btn-secondary" type="button">Refresh queue</button>
+        </div>
+
+        <div class="filter-row" role="group" aria-label="Filter lab orders">
+          <button class="filter is-active" type="button" data-status="">All</button>
+          <button class="filter" type="button" data-status="ordered">Ordered</button>
+          <button class="filter" type="button" data-status="collected">Collected</button>
+          <button class="filter" type="button" data-status="resulted">Resulted</button>
+          <button class="filter" type="button" data-status="released">Released</button>
+        </div>
+
+        <div class="lab-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Orders</h2>
+              <span id="lab-count" class="count"></span>
+            </div>
+            <div id="lab-orders" class="result-list">
+              <p class="empty">No lab orders in this view.</p>
+            </div>
+          </section>
+
+          <section id="lab-detail" class="panel">
+            <div class="panel-head">
+              <h2>Order detail</h2>
+            </div>
+            <div id="lab-detail-body">
+              <p class="empty">Select an order to work on it.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-audit" class="view" aria-labelledby="audit-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Governance</p>
+            <h1 id="audit-title">Audit log</h1>
+            <p class="view-intro">Each entry hashes the previous entry, the facility, the actor, and the exact payload.</p>
+          </div>
+          <button id="audit-verify" class="btn" type="button">Verify chain</button>
+        </div>
+
+        <div id="audit-status" class="audit-status" data-state="idle">
+          <span class="audit-dot" aria-hidden="true"></span>
+          <span id="audit-status-text">Not checked yet.</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th scope="col">Entry</th>
+                <th scope="col">Action</th>
+                <th scope="col">Entity</th>
+                <th scope="col">Actor</th>
+                <th scope="col">When</th>
+                <th scope="col">Hash</th>
+              </tr>
+            </thead>
+            <tbody id="audit-rows">
+              <tr><td colspan="6" class="empty">No entries yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
