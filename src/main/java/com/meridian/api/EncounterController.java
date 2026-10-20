@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -32,15 +33,18 @@ public class EncounterController {
     @PreAuthorize("hasAnyRole('FRONT_DESK','CLINICIAN','ADMIN')")
     public Encounter create(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody CreateEncounterRequest request) {
+            @RequestBody CreateEncounterRequest request,
+            @RequestHeader(value = "X-Meridian-Captured-At", required = false) String capturedAtHeader) {
         ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.createEncounter(
                 scope.facilityId(),
                 scope.actorId(),
+                request.id(),
                 request.patientId(),
                 request.clinicianId(),
                 request.notes(),
-                request.vitals());
+                request.vitals(),
+                OfflineMetadata.capturedAt(capturedAtHeader));
     }
 
     @GetMapping("/{id}")

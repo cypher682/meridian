@@ -46,7 +46,7 @@ class BillingControllerTest {
 
     @Test
     void createsAnInvoiceForFrontDesk() throws Exception {
-        given(service.createInvoice(FACILITY_ID, "frontdesk", ENCOUNTER_ID))
+        given(service.createInvoice(FACILITY_ID, "frontdesk", null, ENCOUNTER_ID, null))
                 .willReturn(invoice("open"));
 
         mockMvc.perform(post("/api/billing/invoices")
@@ -56,6 +56,22 @@ class BillingControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("open"))
                 .andExpect(jsonPath("$.totalCents").value(0));
+    }
+
+    @Test
+    void passesOfflineInvoiceIdAndCaptureTime() throws Exception {
+        UUID clientInvoiceId = UUID.fromString("00000000-0000-0000-0000-000000000999");
+        Instant capturedAt = Instant.parse("2026-10-20T11:30:00Z");
+        given(service.createInvoice(FACILITY_ID, "frontdesk", clientInvoiceId, ENCOUNTER_ID, capturedAt))
+                .willReturn(invoice("open"));
+
+        mockMvc.perform(post("/api/billing/invoices")
+                        .with(frontDeskUser())
+                        .header("X-Meridian-Captured-At", capturedAt.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + clientInvoiceId + "\",\"encounterId\":\"" + ENCOUNTER_ID + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("open"));
     }
 
     @Test

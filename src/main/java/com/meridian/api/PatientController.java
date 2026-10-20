@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -35,15 +36,18 @@ public class PatientController {
     @PreAuthorize("hasAnyRole('FRONT_DESK','ADMIN')")
     public Patient register(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody RegisterPatientRequest request) {
+            @RequestBody RegisterPatientRequest request,
+            @RequestHeader(value = "X-Meridian-Captured-At", required = false) String capturedAtHeader) {
         ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.registerPatient(
                 scope.facilityId(),
                 scope.actorId(),
+                request.id(),
                 request.givenName(),
                 request.familyName(),
                 request.dateOfBirth(),
-                request.phone());
+                request.phone(),
+                OfflineMetadata.capturedAt(capturedAtHeader));
     }
 
     @GetMapping("/{id}")

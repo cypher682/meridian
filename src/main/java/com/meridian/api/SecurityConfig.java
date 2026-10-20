@@ -36,6 +36,7 @@ public class SecurityConfig {
                                 "/index.html",
                                 "/styles.css",
                                 "/app.js",
+                                "/offline.js",
                                 "/favicon.svg",
                                 "/vendor/**",
                                 "/error")

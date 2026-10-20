@@ -1,10 +1,13 @@
 import Keycloak from "/vendor/keycloak.js";
+import * as offline from "./offline.js";
 
 const KEYCLOAK_URL = "http://localhost:8084";
 const KEYCLOAK_REALM = "meridian";
 const KEYCLOAK_CLIENT_ID = "meridian-ui";
 const REFRESH_INTERVAL_MS = 30000;
 const REFRESH_MIN_VALIDITY_S = 60;
+const OFFLINE_SYNC_ENABLED = true;
+const MAX_SYNC_ATTEMPTS = 20;
 
 let keycloak = null;
 let refreshTimer = null;
@@ -47,7 +50,13 @@ const state = {
   selectedInvoice: null,
   pharmacyItems: [],
   dispenses: [],
-  toastTimer: null
+  toastTimer: null,
+  facilityId: null,
+  online: true,
+  flushInProgress: false,
+  flushRequested: false,
+  forceRequested: false,
+  syncSummary: { pending: 0, syncing: 0, failed: 0 }
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -137,6 +146,28 @@ function actor() {
   return state.user || "unknown";
 }
 
+function newId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+    const value = Math.floor(Math.random() * 16);
+    return (character === "x" ? value : (value & 0x3) | 0x8).toString(16);
+  });
+}
+
+function offlineError(message) {
+  const error = new Error(message);
+  error.offline = true;
+  return error;
+}
+
+function isOfflineError(error) {
+  return !navigator.onLine || Boolean(error && (
+    error.offline || error.status === 408 || error.status === 429 || error.status >= 500
+  ));
+}
+
 async function api(path, options = {}) {
   if (!keycloak || !keycloak.authenticated) {
     throw new Error("Sign in is required.");
@@ -145,8 +176,12 @@ async function api(path, options = {}) {
   try {
     await keycloak.updateToken(30);
   } catch {
-    keycloak.login();
-    throw new Error("Session expired. Sign in again.");
+    if (keycloak.isTokenExpired(0)) {
+      if (navigator.onLine) {
+        keycloak.login();
+      }
+      throw offlineError("You are offline. Sign in again when the network returns.");
+    }
   }
 
   const headers = new Headers(options.headers || {});
@@ -155,9 +190,16 @@ async function api(path, options = {}) {
   }
   headers.set("Authorization", `Bearer ${keycloak.token}`);
 
-  const response = await fetch(path, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers });
+  } catch {
+    throw offlineError("The API is unreachable. Changes will sync when it returns.");
+  }
   if (response.status === 401) {
-    keycloak.login();
+    if (navigator.onLine) {
+      keycloak.login();
+    }
     throw new Error("Session expired. Sign in again.");
   }
   if (!response.ok) {
@@ -170,7 +212,9 @@ async function api(path, options = {}) {
     } catch {
       // Keep the status-based message.
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) {
     return null;
@@ -195,17 +239,405 @@ function reportError(error) {
 
 async function checkHealth() {
   const connection = $("#connection");
+  const wasOnline = state.online;
   try {
     const response = await fetch("/api/health");
     if (!response.ok) {
       throw new Error("unhealthy");
     }
+    state.online = true;
     connection.dataset.state = "online";
     connection.textContent = "API ready";
   } catch {
+    state.online = false;
     connection.dataset.state = "offline";
     connection.textContent = "API unavailable";
   }
+  renderSyncStatus();
+  if (!wasOnline && state.online && keycloak && keycloak.authenticated) {
+    flushOutbox({ force: true });
+  }
+}
+
+function syncLabel(type) {
+  return {
+    "patient.register": "Patient",
+    "encounter.create": "Encounter",
+    "billing.invoice.create": "Invoice",
+    "billing.charge.create": "Charge",
+    "billing.invoice.pay": "Payment"
+  }[type] || "Change";
+}
+
+function syncBadge(item) {
+  if (!item) {
+    return "";
+  }
+  if (item._failed) {
+    return `<span class="sync-badge" data-state="failed">Sync failed</span>`;
+  }
+  if (item._pending) {
+    return `<span class="sync-badge">Pending sync</span>`;
+  }
+  return "";
+}
+
+function replaceById(list, item) {
+  if (!item || !item.id) {
+    return;
+  }
+  const index = list.findIndex((candidate) => candidate.id === item.id);
+  if (index >= 0) {
+    list[index] = item;
+  } else {
+    list.unshift(item);
+  }
+}
+
+function mergeInvoiceData(data) {
+  if (!data || !data.id) {
+    return data;
+  }
+  const local = (state.selectedInvoice && state.selectedInvoice.id === data.id)
+    ? state.selectedInvoice
+    : state.billingInvoices.find((invoice) => invoice.id === data.id);
+  if (!local) {
+    return data;
+  }
+
+  const serverCharges = data.charges || [];
+  const pendingCharges = (local.charges || []).filter((charge) => (
+    charge._pending && !serverCharges.some((serverCharge) => serverCharge.id === charge.id)
+  ));
+  const merged = {
+    ...data,
+    charges: [...serverCharges, ...pendingCharges],
+    _pending: pendingCharges.length > 0
+  };
+  if (pendingCharges.length) {
+    merged.totalCents = Number(data.totalCents || 0)
+      + pendingCharges.reduce((sum, charge) => sum + Number(charge.amountCents || 0), 0);
+  }
+  if (local.status === "paid" && data.status === "open") {
+    merged.status = "paid";
+    merged.paidAt = local.paidAt;
+    merged.paidBy = local.paidBy;
+    merged._pending = true;
+  }
+  return merged;
+}
+
+async function refreshSyncSummary() {
+  if (!state.facilityId) {
+    state.syncSummary = { pending: 0, syncing: 0, failed: 0 };
+    renderSyncStatus();
+    return;
+  }
+  try {
+    state.syncSummary = await offline.outboxSummary(state.facilityId);
+  } catch {
+    state.syncSummary = { pending: 0, syncing: 0, failed: 0 };
+  }
+  renderSyncStatus();
+}
+
+function renderSyncStatus() {
+  const pill = $("#sync-pill");
+  const button = $("#sync-now");
+  if (!pill) {
+    return;
+  }
+  const { pending = 0, syncing = 0, failed = 0 } = state.syncSummary;
+  const queued = pending + syncing + failed;
+  let label = state.online ? "Online" : "Offline";
+  let visualState = state.online ? "online" : "offline";
+  if (syncing) {
+    label = `Syncing ${syncing}`;
+    visualState = "pending";
+  } else if (failed) {
+    label = state.online ? `${failed} failed` : `Offline · ${failed} failed`;
+    visualState = "offline";
+  } else if (pending) {
+    label = state.online ? `${pending} pending` : `Offline · ${pending} pending`;
+    visualState = state.online ? "pending" : "offline";
+  } else if (!state.online) {
+    label = "Offline";
+    visualState = "offline";
+  }
+  pill.dataset.state = visualState;
+  pill.textContent = label;
+  if (button) {
+    button.hidden = queued === 0;
+    button.disabled = !state.online || state.flushInProgress;
+    button.textContent = state.flushInProgress ? "Syncing…" : failed ? "Retry sync" : "Sync now";
+  }
+}
+
+async function postOutboxEntry(entry) {
+  try {
+    await keycloak.updateToken(30);
+  } catch {
+    if (keycloak.isTokenExpired(0)) {
+      if (navigator.onLine) {
+        keycloak.login();
+      }
+      throw offlineError("Sign in again to sync queued changes.");
+    }
+  }
+
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${keycloak.token}`);
+  headers.set("X-Meridian-Captured-At", entry.capturedAt);
+  let body;
+  if (entry.body) {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(entry.body);
+  }
+
+  let response;
+  try {
+    response = await fetch(entry.path, { method: "POST", headers, body });
+  } catch {
+    throw offlineError("The API is unreachable. Queued changes are safe.");
+  }
+  if (response.status === 401) {
+    if (navigator.onLine) {
+      keycloak.login();
+    }
+    const error = new Error("Session expired. Sign in again.");
+    error.status = 401;
+    throw error;
+  }
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const data = await response.json();
+      if (data && data.error) {
+        message = data.error;
+      }
+    } catch {
+      // Keep the status-based message.
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  if (response.status === 204) {
+    return null;
+  }
+  return response.json();
+}
+
+async function applySyncedEntry(entry, data) {
+  if (!data) {
+    return;
+  }
+  if (entry.type === "patient.register") {
+    await offline.cachePatient(data);
+    replaceById(state.searchResults, data);
+    if (state.patient && state.patient.id === data.id) {
+      state.patient = data;
+    }
+    renderPatientResults();
+    if (state.view === "clinician") {
+      renderClinician();
+    }
+  }
+  if (entry.type === "encounter.create") {
+    await offline.cacheEncounter(state.facilityId, data);
+    if (state.patient && state.patient.id === data.patientId) {
+      replaceById(state.encounters, data);
+      state.encounters.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+      if (state.selectedEncounterId === data.id) {
+        state.selectedEncounterId = data.id;
+      }
+      renderEncounterList();
+      renderChart();
+    }
+    if (state.view === "clinician") {
+      renderClinician();
+    }
+  }
+  if (entry.type === "billing.invoice.create" || entry.type === "billing.charge.create" || entry.type === "billing.invoice.pay") {
+    const merged = mergeInvoiceData(data);
+    await offline.cacheInvoice(state.facilityId, merged);
+    replaceById(state.billingInvoices, merged);
+    if (state.selectedInvoice && state.selectedInvoice.id === merged.id) {
+      state.selectedInvoice = merged;
+    }
+    renderBillingInvoices();
+  }
+}
+
+function markFailed(entry) {
+  const targetId = entry.targetId || (entry.body && entry.body.id);
+  if (entry.type === "patient.register") {
+    const patient = state.searchResults.find((candidate) => candidate.id === targetId)
+      || (state.patient && state.patient.id === targetId ? state.patient : null);
+    if (patient) {
+      patient._failed = true;
+      patient._pending = false;
+    }
+    renderPatientResults();
+  }
+  if (entry.type === "encounter.create") {
+    const encounter = state.encounters.find((candidate) => candidate.id === targetId);
+    if (encounter) {
+      encounter._failed = true;
+      encounter._pending = false;
+    }
+    renderEncounterList();
+  }
+  if (entry.type === "billing.invoice.create" || entry.type === "billing.charge.create" || entry.type === "billing.invoice.pay") {
+    const invoice = state.billingInvoices.find((candidate) => candidate.id === (entry.parentId || targetId));
+    if (invoice) {
+      invoice._failed = true;
+      invoice._pending = false;
+    }
+    if (state.selectedInvoice && state.selectedInvoice.id === (entry.parentId || targetId)) {
+      state.selectedInvoice._failed = true;
+      state.selectedInvoice._pending = false;
+    }
+    renderBillingInvoices();
+    renderBillingDetail();
+  }
+}
+
+async function flushOutbox(options = {}) {
+  const force = Boolean(options.force);
+  if (!OFFLINE_SYNC_ENABLED || !keycloak || !keycloak.authenticated || !state.facilityId) {
+    return;
+  }
+  if (state.flushInProgress) {
+    state.flushRequested = true;
+    state.forceRequested = state.forceRequested || force;
+    return;
+  }
+  if (!navigator.onLine) {
+    await refreshSyncSummary();
+    return;
+  }
+
+  state.flushInProgress = true;
+  renderSyncStatus();
+  try {
+    if (navigator.locks && typeof navigator.locks.request === "function") {
+      await navigator.locks.request("meridian-outbox-sync", () => drainOutbox(force));
+    } else {
+      await drainOutbox(force);
+    }
+  } catch (error) {
+    showToast(`Sync failed: ${error.message}`, "error");
+  } finally {
+    state.flushInProgress = false;
+    await refreshSyncSummary();
+    renderSyncStatus();
+    if (state.flushRequested) {
+      const forceNext = state.forceRequested;
+      state.flushRequested = false;
+      state.forceRequested = false;
+      flushOutbox({ force: forceNext });
+    }
+  }
+}
+
+async function drainOutbox(force) {
+  await offline.resetStaleSyncing(state.facilityId);
+  let entries = await offline.listOutbox(state.facilityId);
+  if (entries.some((entry) => entry.actor !== actor())) {
+    showToast("Queued changes belong to another user. Sign in as that user or clear offline data.", "error");
+    return;
+  }
+  if (force) {
+    for (const entry of entries) {
+      if (entry.status === "failed" || entry.status === "pending") {
+        await offline.updateOutbox(entry.operationId, {
+          status: "pending",
+          attempts: 0,
+          nextAttemptAt: 0,
+          lastError: null
+        });
+      }
+    }
+    entries = await offline.listOutbox(state.facilityId);
+  }
+
+  for (const entry of entries) {
+    if (entry.status === "failed") {
+      break;
+    }
+    if (entry.status !== "pending") {
+      continue;
+    }
+    if (!force && entry.nextAttemptAt && entry.nextAttemptAt > Date.now()) {
+      break;
+    }
+
+    await offline.updateOutbox(entry.operationId, { status: "syncing" });
+    await refreshSyncSummary();
+    try {
+      const data = await postOutboxEntry(entry);
+      await applySyncedEntry(entry, data);
+      await offline.removeOutbox(entry.operationId);
+      await refreshSyncSummary();
+    } catch (error) {
+      const attempts = (entry.attempts || 0) + 1;
+      if (error.status === 401) {
+        await offline.updateOutbox(entry.operationId, {
+          status: "pending",
+          attempts,
+          lastError: error.message
+        });
+        showToast("Sign in again to sync queued changes.", "error");
+        break;
+      }
+      if (isOfflineError(error) && attempts < MAX_SYNC_ATTEMPTS) {
+        const delay = Math.min(60000, 3000 * 2 ** Math.min(attempts, 4));
+        await offline.updateOutbox(entry.operationId, {
+          status: "pending",
+          attempts,
+          nextAttemptAt: Date.now() + delay,
+          lastError: error.message
+        });
+        break;
+      }
+      const failed = {
+        ...entry,
+        status: "failed",
+        attempts,
+        lastError: error.message
+      };
+      await offline.updateOutbox(entry.operationId, failed);
+      markFailed(failed);
+      showToast(`${syncLabel(entry.type)} could not sync: ${error.message}`, "error");
+      break;
+    }
+    await refreshSyncSummary();
+  }
+}
+
+async function enqueueOperation(entry) {
+  const queued = {
+    operationId: newId(),
+    status: "pending",
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: null,
+    createdAt: new Date().toISOString(),
+    capturedAt: new Date().toISOString(),
+    facilityId: state.facilityId,
+    actor: actor(),
+    ...entry
+  };
+  await offline.enqueueOperation(queued);
+  await refreshSyncSummary();
+  if (navigator.onLine) {
+    showToast(`${syncLabel(queued.type)} saved. Syncing…`);
+    flushOutbox();
+  } else {
+    showToast(`${syncLabel(queued.type)} saved offline. It will sync automatically.`, "warn");
+  }
+  return queued;
 }
 
 function hasAnyRole(...roles) {
@@ -302,14 +734,28 @@ function renderPatientResults() {
       </span>
       <span class="result-cell">${esc(patient.phone || "No phone")}</span>
       <span class="result-cell">Chart ${esc(shortId(patient.id))}</span>
-      <span class="result-action">Open chart</span>
+      <span class="result-action">${syncBadge(patient) || "Open chart"}</span>
     </button>
   `).join("");
 }
 
 async function searchPatients(query) {
   state.lastQuery = query.trim();
-  state.searchResults = await api(`/api/patients?q=${encodeURIComponent(query.trim())}`);
+  try {
+    const remote = await api(`/api/patients?q=${encodeURIComponent(query.trim())}`);
+    await offline.cachePatients(state.facilityId, remote);
+    const cached = await offline.searchCachedPatients(state.facilityId, query);
+    const pending = cached.filter((patient) => (
+      (patient._pending || patient._failed) && !remote.some((item) => item.id === patient.id)
+    ));
+    state.searchResults = [...pending, ...remote];
+  } catch (error) {
+    if (!isOfflineError(error)) {
+      throw error;
+    }
+    state.searchResults = await offline.searchCachedPatients(state.facilityId, query);
+    showToast("Showing cached patients. Changes will sync when the API returns.", "warn");
+  }
   renderPatientResults();
 }
 
@@ -342,7 +788,7 @@ function renderEncounterList() {
         <span class="result-meta">${esc(encounter.clinicianId)}${encounter.notes ? ` · ${esc(encounter.notes)}` : ""}</span>
       </span>
       <span class="result-cell">${esc(vitalsSummary(encounter.vitals))}</span>
-      <span class="result-action">${canView("clinician") ? "Order labs" : "View only"}</span>
+      <span class="result-action">${syncBadge(encounter)}${canView("clinician") ? "Order labs" : "View only"}</span>
     </button>
   `).join("");
 }
@@ -363,7 +809,7 @@ function renderClinicianEncounters() {
         <span class="result-meta">${esc(encounter.clinicianId)} · ${encounter.notes ? esc(encounter.notes) : "No notes"}</span>
       </span>
       <span class="result-cell">${esc(vitalsSummary(encounter.vitals))}</span>
-      <span class="result-action">${encounter.id === state.selectedEncounterId ? "Selected" : "Select"}</span>
+      <span class="result-action">${syncBadge(encounter)}${encounter.id === state.selectedEncounterId ? "Selected" : "Select"}</span>
     </button>
   `).join("");
   updateOrderForm();
@@ -407,8 +853,21 @@ async function selectPatient(patient) {
   renderChart();
   renderClinician();
 
+  if (patient._pending || patient._failed) {
+    state.encounters = await offline.getCachedEncounters(state.facilityId, patient.id);
+    if (state.encounters.length) {
+      state.selectedEncounterId = state.encounters[0].id;
+    }
+    state.patientOrders = [];
+    renderChart();
+    renderClinician();
+    renderPatientOrders();
+    return;
+  }
+
   try {
     state.encounters = await api(`/api/patients/${patient.id}/encounters`);
+    await offline.cacheEncounters(state.facilityId, patient.id, state.encounters);
     if (state.encounters.length) {
       state.selectedEncounterId = state.encounters[0].id;
     }
@@ -416,7 +875,19 @@ async function selectPatient(patient) {
     renderClinician();
     await loadPatientOrders();
   } catch (error) {
-    reportError(error);
+    if (!isOfflineError(error)) {
+      reportError(error);
+      return;
+    }
+    state.encounters = await offline.getCachedEncounters(state.facilityId, patient.id);
+    if (state.encounters.length) {
+      state.selectedEncounterId = state.encounters[0].id;
+    }
+    state.patientOrders = [];
+    renderChart();
+    renderClinician();
+    renderPatientOrders();
+    showToast("Showing cached encounters. New changes will sync later.", "warn");
   }
 }
 
@@ -433,7 +904,14 @@ async function loadPatientOrders() {
   if (!state.patient) {
     return;
   }
-  state.patientOrders = await api(`/api/lab-orders?patientId=${state.patient.id}`);
+  try {
+    state.patientOrders = await api(`/api/lab-orders?patientId=${state.patient.id}`);
+  } catch (error) {
+    if (!isOfflineError(error)) {
+      throw error;
+    }
+    state.patientOrders = [];
+  }
   renderPatientOrders();
 }
 
@@ -816,7 +1294,7 @@ function renderBillingInvoices() {
       </span>
       <span class="result-cell">${statusBadge(invoice.status)}</span>
       <span class="result-cell">${esc(money(invoice.totalCents))}</span>
-      <span class="result-action">Open</span>
+      <span class="result-action">${syncBadge(invoice) || "Open"}</span>
     </button>
   `).join("");
 }
@@ -839,7 +1317,7 @@ function renderBillingDetail() {
           <h3>Invoice ${esc(shortId(invoice.id))}</h3>
           <p class="result-meta">Encounter ${esc(shortId(invoice.encounterId))} · patient ${esc(shortId(invoice.patientId))}</p>
         </div>
-        ${statusBadge(invoice.status)}
+        <span>${statusBadge(invoice.status)}${syncBadge(invoice)}</span>
       </div>
       <dl class="result-meta">
         <div><dt>Total</dt><dd>${esc(money(invoice.totalCents))}</dd></div>
@@ -882,23 +1360,71 @@ function renderBillingDetail() {
 async function loadBilling() {
   renderBillingEncounterOptions();
   try {
-    state.billingInvoices = await api("/api/billing/invoices");
+    const remote = await api("/api/billing/invoices");
+    await offline.cacheInvoices(state.facilityId, remote);
+    const cached = await offline.listCachedInvoices(state.facilityId);
+    const pending = cached.filter((invoice) => (
+      (invoice._pending || invoice._failed) && !remote.some((item) => item.id === invoice.id)
+    ));
+    state.billingInvoices = [...pending, ...remote];
     renderBillingInvoices();
     if (state.selectedInvoice) {
       await selectInvoice(state.selectedInvoice.id);
     }
   } catch (error) {
-    reportError(error);
+    if (!isOfflineError(error)) {
+      reportError(error);
+      return;
+    }
+    state.billingInvoices = await offline.listCachedInvoices(state.facilityId);
+    renderBillingInvoices();
+    if (state.selectedInvoice) {
+      const cached = await offline.getCachedInvoice(state.selectedInvoice.id);
+      if (cached) {
+        state.selectedInvoice = cached;
+        renderBillingInvoices();
+        renderBillingDetail();
+      }
+    }
+    showToast("Showing cached invoices. New changes will sync later.", "warn");
   }
 }
 
 async function selectInvoice(invoiceId) {
+  const alreadySelected = state.selectedInvoice && state.selectedInvoice.id === invoiceId;
+  const keepChargeForm = alreadySelected && Boolean(
+    $("#charge-form input[name=description]")?.value || $("#charge-form input[name=amount]")?.value
+  );
+  const local = await offline.getCachedInvoice(invoiceId);
+  if (local && (local._pending || local._failed)) {
+    state.selectedInvoice = local;
+    renderBillingInvoices();
+    if (!keepChargeForm) {
+      renderBillingDetail();
+    }
+    return;
+  }
   try {
     state.selectedInvoice = await api(`/api/billing/invoices/${invoiceId}`);
+    await offline.cacheInvoice(state.facilityId, state.selectedInvoice);
+    renderBillingInvoices();
+    if (!keepChargeForm) {
+      renderBillingDetail();
+    }
+  } catch (error) {
+    if (!isOfflineError(error)) {
+      reportError(error);
+      return;
+    }
+    const cached = await offline.getCachedInvoice(invoiceId);
+    if (!cached) {
+      reportError(new Error("This invoice is not available offline."));
+      return;
+    }
+    state.selectedInvoice = cached;
     renderBillingInvoices();
     renderBillingDetail();
-  } catch (error) {
-    reportError(error);
+    showToast("Showing the cached invoice.", "warn");
   }
 }
 
@@ -1070,20 +1596,41 @@ function bindEvents() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
+    const patient = {
+      id: newId(),
+      facilityId: state.facilityId,
+      givenName: String(data.get("givenName") || "").trim(),
+      familyName: String(data.get("familyName") || "").trim(),
+      dateOfBirth: data.get("dateOfBirth"),
+      phone: String(data.get("phone") || "").trim() || null,
+      createdAt: new Date().toISOString(),
+      _pending: true
+    };
     try {
-      const patient = await api("/api/patients", {
-        method: "POST",
-        body: JSON.stringify({
-          givenName: data.get("givenName"),
-          familyName: data.get("familyName"),
-          dateOfBirth: data.get("dateOfBirth"),
-          phone: data.get("phone")
-        })
-      });
+      await offline.cachePatient(patient);
       form.reset();
-      await searchPatients("");
-      await selectPatient(patient);
-      showToast(`${patientName(patient)} registered.`);
+      $("#search-q").value = "";
+      state.lastQuery = "";
+      replaceById(state.searchResults, patient);
+      state.patient = patient;
+      state.encounters = [];
+      state.selectedEncounterId = null;
+      state.patientOrders = [];
+      renderPatientResults();
+      renderChart();
+      renderClinician();
+      await enqueueOperation({
+        type: "patient.register",
+        path: "/api/patients",
+        targetId: patient.id,
+        body: {
+          id: patient.id,
+          givenName: patient.givenName,
+          familyName: patient.familyName,
+          dateOfBirth: patient.dateOfBirth,
+          phone: patient.phone
+        }
+      });
     } catch (error) {
       reportError(error);
     }
@@ -1096,6 +1643,11 @@ function bindEvents() {
     }
     if (!canView("clinician")) {
       showToast("Only clinicians can order labs from an encounter.", "error");
+      return;
+    }
+    const encounter = state.encounters.find((item) => item.id === row.dataset.encounterId);
+    if (encounter && (encounter._pending || encounter._failed)) {
+      showToast("This encounter is still syncing. Lab orders need the server copy first.", "warn");
       return;
     }
     state.selectedEncounterId = row.dataset.encounterId;
@@ -1117,22 +1669,35 @@ function bindEvents() {
       }
     });
     try {
-      await api("/api/encounters", {
-        method: "POST",
-        body: JSON.stringify({
-          patientId: state.patient.id,
-          clinicianId: data.get("clinicianId"),
-          notes: data.get("notes"),
-          vitals
-        })
-      });
+      const encounter = {
+        id: newId(),
+        facilityId: state.facilityId,
+        patientId: state.patient.id,
+        clinicianId: String(data.get("clinicianId") || "").trim(),
+        notes: String(data.get("notes") || "").trim() || null,
+        vitals,
+        createdAt: new Date().toISOString(),
+        _pending: true
+      };
+      await offline.cacheEncounter(state.facilityId, encounter);
+      state.encounters.unshift(encounter);
+      state.selectedEncounterId = encounter.id;
       form.reset();
       $("#enc-clinician").value = actor();
-      state.encounters = await api(`/api/patients/${state.patient.id}/encounters`);
-      state.selectedEncounterId = state.encounters.length ? state.encounters[0].id : null;
       renderChart();
       renderClinician();
-      showToast("Encounter created.");
+      await enqueueOperation({
+        type: "encounter.create",
+        path: "/api/encounters",
+        targetId: encounter.id,
+        body: {
+          id: encounter.id,
+          patientId: encounter.patientId,
+          clinicianId: encounter.clinicianId,
+          notes: encounter.notes,
+          vitals: encounter.vitals
+        }
+      });
     } catch (error) {
       reportError(error);
     }
@@ -1199,14 +1764,38 @@ function bindEvents() {
   $("#billing-invoice-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    const encounterId = String(data.get("encounterId") || "");
+    const encounter = state.encounters.find((item) => item.id === encounterId);
+    if (!encounter) {
+      showToast("Open a patient chart and select an encounter first.", "error");
+      return;
+    }
+    const invoice = {
+      id: newId(),
+      facilityId: state.facilityId,
+      encounterId,
+      patientId: encounter.patientId,
+      status: "open",
+      totalCents: 0,
+      createdBy: actor(),
+      createdAt: new Date().toISOString(),
+      paidAt: null,
+      paidBy: null,
+      charges: [],
+      _pending: true
+    };
     try {
-      const invoice = await api("/api/billing/invoices", {
-        method: "POST",
-        body: JSON.stringify({ encounterId: data.get("encounterId") })
-      });
+      await offline.cacheInvoice(state.facilityId, invoice);
+      replaceById(state.billingInvoices, invoice);
       state.selectedInvoice = invoice;
-      await loadBilling();
-      showToast(`Invoice ${shortId(invoice.id)} created.`);
+      renderBillingInvoices();
+      renderBillingDetail();
+      await enqueueOperation({
+        type: "billing.invoice.create",
+        path: "/api/billing/invoices",
+        targetId: invoice.id,
+        body: { id: invoice.id, encounterId }
+      });
     } catch (error) {
       reportError(error);
     }
@@ -1231,15 +1820,38 @@ function bindEvents() {
       return;
     }
     try {
-      state.selectedInvoice = await api(`/api/billing/invoices/${state.selectedInvoice.id}/charges`, {
-        method: "POST",
-        body: JSON.stringify({
-          description: data.get("description"),
-          amountCents: Math.round(amount * 100)
-        })
+      const invoice = state.selectedInvoice;
+      const charge = {
+        id: newId(),
+        invoiceId: invoice.id,
+        description: String(data.get("description") || "").trim(),
+        amountCents: Math.round(amount * 100),
+        createdBy: actor(),
+        createdAt: new Date().toISOString(),
+        _pending: true
+      };
+      const updated = {
+        ...invoice,
+        totalCents: Number(invoice.totalCents || 0) + charge.amountCents,
+        charges: [...(invoice.charges || []), charge],
+        _pending: true
+      };
+      await offline.cacheInvoice(state.facilityId, updated);
+      replaceById(state.billingInvoices, updated);
+      state.selectedInvoice = updated;
+      renderBillingInvoices();
+      renderBillingDetail();
+      await enqueueOperation({
+        type: "billing.charge.create",
+        path: `/api/billing/invoices/${invoice.id}/charges`,
+        targetId: charge.id,
+        parentId: invoice.id,
+        body: {
+          id: charge.id,
+          description: charge.description,
+          amountCents: charge.amountCents
+        }
       });
-      await loadBilling();
-      showToast("Charge added.");
     } catch (error) {
       reportError(error);
     }
@@ -1250,11 +1862,25 @@ function bindEvents() {
       return;
     }
     try {
-      state.selectedInvoice = await api(`/api/billing/invoices/${state.selectedInvoice.id}/pay`, {
-        method: "POST"
+      const invoice = state.selectedInvoice;
+      const updated = {
+        ...invoice,
+        status: "paid",
+        paidAt: new Date().toISOString(),
+        paidBy: actor(),
+        _pending: true
+      };
+      await offline.cacheInvoice(state.facilityId, updated);
+      replaceById(state.billingInvoices, updated);
+      state.selectedInvoice = updated;
+      renderBillingInvoices();
+      renderBillingDetail();
+      await enqueueOperation({
+        type: "billing.invoice.pay",
+        path: `/api/billing/invoices/${invoice.id}/pay`,
+        targetId: invoice.id,
+        parentId: invoice.id
       });
-      await loadBilling();
-      showToast("Invoice marked paid.");
     } catch (error) {
       reportError(error);
     }
@@ -1337,7 +1963,16 @@ function bindEvents() {
 
   $("#denied-back").addEventListener("click", () => setView(firstAllowedView()));
 
-  $("#sign-out").addEventListener("click", () => {
+  $("#sign-out").addEventListener("click", async () => {
+    const queued = state.syncSummary.pending + state.syncSummary.syncing + state.syncSummary.failed;
+    if (queued && !window.confirm(`${queued} queued change${queued === 1 ? "" : "s"} will be discarded. Sign out anyway?`)) {
+      return;
+    }
+    try {
+      await offline.clearOfflineData();
+    } catch {
+      // Sign out even if local cleanup fails.
+    }
     keycloak.logout({ redirectUri: `${window.location.origin}/` });
   });
 }
@@ -1375,20 +2010,57 @@ async function start() {
 
   state.user = keycloak.tokenParsed?.preferred_username || keycloak.subject || "user";
   state.roles = keycloak.tokenParsed?.realm_access?.roles || [];
+  state.facilityId = keycloak.tokenParsed?.facility_id || null;
 
-  keycloak.onTokenExpired = () => {
-    keycloak.updateToken(30).catch(() => keycloak.login());
+  const refreshSession = () => {
+    keycloak.updateToken(REFRESH_MIN_VALIDITY_S).catch(() => {
+      if (navigator.onLine && keycloak.isTokenExpired(0)) {
+        keycloak.login();
+      }
+    });
   };
+
+  keycloak.onTokenExpired = refreshSession;
 
   refreshTimer = window.setInterval(() => {
     if (keycloak.authenticated) {
-      keycloak.updateToken(REFRESH_MIN_VALIDITY_S).catch(() => keycloak.login());
+      refreshSession();
     }
   }, REFRESH_INTERVAL_MS);
+
+  try {
+    await offline.openOfflineStore();
+    await offline.resetStaleSyncing(state.facilityId);
+    await refreshSyncSummary();
+  } catch (error) {
+    showToast(`Offline storage is unavailable: ${error.message}`, "error");
+  }
 
   $("#auth-gate").classList.add("is-hidden");
   $("#session-user").textContent = state.user;
   init();
+  flushOutbox();
+
+  window.addEventListener("online", () => {
+    checkHealth();
+    flushOutbox({ force: true });
+  });
+  window.addEventListener("offline", () => {
+    state.online = false;
+    const connection = $("#connection");
+    if (connection) {
+      connection.dataset.state = "offline";
+      connection.textContent = "API unavailable";
+    }
+    renderSyncStatus();
+    showToast("You are offline. Front-desk changes will queue locally.", "warn");
+  });
+  $("#sync-now").addEventListener("click", () => flushOutbox({ force: true }));
+  window.setInterval(() => {
+    if (navigator.onLine && state.syncSummary.pending) {
+      flushOutbox();
+    }
+  }, 15000);
 }
 
 start().catch((error) => {

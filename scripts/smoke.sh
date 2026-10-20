@@ -65,22 +65,56 @@ audit_before="$(api "$AUDITOR_TOKEN" "$BASE_URL/api/audit?limit=500" | jq 'lengt
 expected_audit=$((audit_before + 16))
 
 echo "register patient"
+captured_at="2026-10-20T12:00:00Z"
+patient_id="$(cat /proc/sys/kernel/random/uuid)"
+patient_payload="$(jq -nc --arg id "$patient_id" \
+  '{id:$id,givenName:"Sana",familyName:"Smoke",dateOfBirth:"1992-02-03",phone:"+00000000001"}')"
 patient_json="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/patients" \
   -H 'content-type: application/json' \
-  -d '{"givenName":"Sana","familyName":"Smoke","dateOfBirth":"1992-02-03","phone":"+00000000001"}')"
-patient_id="$(jq -r '.id' <<<"$patient_json")"
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$patient_payload")"
 [[ "$patient_id" != "null" && -n "$patient_id" ]] || fail "patient id missing"
+assert_eq "$(jq -r '.id' <<<"$patient_json")" "$patient_id" "client patient id is preserved"
 assert_eq "$(jq -r '.givenName' <<<"$patient_json")" "Sana" "patient given name"
+
+echo "idempotent patient replay"
+patient_replay="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/patients" \
+  -H 'content-type: application/json' \
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$patient_payload")"
+assert_eq "$(jq -r '.id' <<<"$patient_replay")" "$patient_id" "patient replay returns the same chart"
+assert_eq "$(api "$AUDITOR_TOKEN" "$BASE_URL/api/audit?limit=500" | jq 'length')" "$((audit_before + 1))" "patient replay does not duplicate audit"
+assert_eq "$(status_for "$FRONT_TOKEN" -X POST "$BASE_URL/api/patients" \
+  -H 'content-type: application/json' \
+  -d "$(jq -nc --arg id "$patient_id" '{id:$id,givenName:"Sana",familyName:"Different",dateOfBirth:"1992-02-03"}')")" "409" "patient id conflict is rejected"
+assert_eq "$(status_for "$OTHER_FACILITY_TOKEN" -X POST "$BASE_URL/api/patients" \
+  -H 'content-type: application/json' \
+  -d "$patient_payload")" "404" "unknown facility cannot reuse a patient id"
 
 echo "search patient"
 assert_eq "$(api "$FRONT_TOKEN" "$BASE_URL/api/patients?q=Smoke" | jq --arg id "$patient_id" '[.[] | select(.id == $id)] | length')" "1" "patient search finds record"
 
 echo "create encounter"
+encounter_id="$(cat /proc/sys/kernel/random/uuid)"
+encounter_payload="$(jq -nc --arg id "$encounter_id" --arg patient_id "$patient_id" \
+  '{id:$id,patientId:$patient_id,clinicianId:"clinician-smoke",notes:"smoke encounter",vitals:{temperature_c:37.1,heart_rate:80}}')"
 encounter_json="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/encounters" \
   -H 'content-type: application/json' \
-  -d "$(jq -nc --arg patient_id "$patient_id" '{patientId:$patient_id,clinicianId:"clinician-smoke",notes:"smoke encounter",vitals:{temperature_c:37.1,heart_rate:80}}')")"
-encounter_id="$(jq -r '.id' <<<"$encounter_json")"
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$encounter_payload")"
+assert_eq "$(jq -r '.id' <<<"$encounter_json")" "$encounter_id" "client encounter id is preserved"
 assert_eq "$(jq -r '.patientId' <<<"$encounter_json")" "$patient_id" "encounter binds patient"
+
+echo "idempotent encounter replay"
+encounter_replay="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/encounters" \
+  -H 'content-type: application/json' \
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$encounter_payload")"
+assert_eq "$(jq -r '.id' <<<"$encounter_replay")" "$encounter_id" "encounter replay returns the same encounter"
+assert_eq "$(api "$AUDITOR_TOKEN" "$BASE_URL/api/audit?limit=500" | jq 'length')" "$((audit_before + 2))" "encounter replay does not duplicate audit"
+assert_eq "$(status_for "$FRONT_TOKEN" -X POST "$BASE_URL/api/encounters" \
+  -H 'content-type: application/json' \
+  -d "$(jq -nc --arg id "$encounter_id" --arg patient_id "$patient_id" '{id:$id,patientId:$patient_id,clinicianId:"someone-else",notes:"conflict"}')")" "409" "encounter id conflict is rejected"
 
 echo "list encounters"
 assert_eq "$(api "$CLINICIAN_TOKEN" "$BASE_URL/api/patients/$patient_id/encounters" | jq 'length')" "1" "patient has one encounter"
@@ -165,22 +199,55 @@ assert_eq "$(api "$CLINICIAN_TOKEN" "$BASE_URL/api/lab-orders/$hl7_order_id" | j
 assert_eq "$(api "$CLINICIAN_TOKEN" "$BASE_URL/api/lab-orders/$hl7_order_id" | jq -r '.result.valueText')" "5.4" "hl7 result value stored"
 
 echo "billing"
+invoice_id="$(cat /proc/sys/kernel/random/uuid)"
+invoice_payload="$(jq -nc --arg id "$invoice_id" --arg encounter_id "$encounter_id" \
+  '{id:$id,encounterId:$encounter_id}')"
 invoice_json="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices" \
   -H 'content-type: application/json' \
-  -d "$(jq -nc --arg encounter_id "$encounter_id" '{encounterId:$encounter_id}')")"
-invoice_id="$(jq -r '.id' <<<"$invoice_json")"
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$invoice_payload")"
+assert_eq "$(jq -r '.id' <<<"$invoice_json")" "$invoice_id" "client invoice id is preserved"
 assert_eq "$(jq -r '.status' <<<"$invoice_json")" "open" "invoice starts open"
 assert_eq "$(jq -r '.totalCents' <<<"$invoice_json")" "0" "invoice starts empty"
 
+echo "idempotent invoice replay"
+invoice_replay="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices" \
+  -H 'content-type: application/json' \
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$invoice_payload")"
+assert_eq "$(jq -r '.id' <<<"$invoice_replay")" "$invoice_id" "invoice replay returns the same invoice"
+
+charge_id="$(cat /proc/sys/kernel/random/uuid)"
+charge_payload="$(jq -nc --arg id "$charge_id" '{id:$id,description:"Visit fee",amountCents:12000}')"
 invoice_charged="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/charges" \
   -H 'content-type: application/json' \
-  -d '{"description":"Visit fee","amountCents":12000}')"
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$charge_payload")"
 assert_eq "$(jq -r '.totalCents' <<<"$invoice_charged")" "12000" "invoice charge is added"
+assert_eq "$(jq -r '.charges[0].id' <<<"$invoice_charged")" "$charge_id" "client charge id is preserved"
 assert_eq "$(jq -r '.charges[0].description' <<<"$invoice_charged")" "Visit fee" "invoice charge is stored"
 
-invoice_paid="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/pay")"
+echo "idempotent charge replay"
+invoice_recharged="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/charges" \
+  -H 'content-type: application/json' \
+  -H "X-Meridian-Captured-At: $captured_at" \
+  -d "$charge_payload")"
+assert_eq "$(jq -r '.totalCents' <<<"$invoice_recharged")" "12000" "charge replay does not double the total"
+assert_eq "$(jq '.charges | length' <<<"$invoice_recharged")" "1" "charge replay does not duplicate the line"
+assert_eq "$(status_for "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/charges" \
+  -H 'content-type: application/json' \
+  -d "$(jq -nc --arg id "$charge_id" '{id:$id,description:"Different",amountCents:12000}')")" "409" "charge id conflict is rejected"
+
+invoice_paid="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/pay" \
+  -H "X-Meridian-Captured-At: $captured_at")"
 assert_eq "$(jq -r '.status' <<<"$invoice_paid")" "paid" "invoice is paid"
 assert_eq "$(jq -r '.paidBy' <<<"$invoice_paid")" "frontdesk" "invoice payment actor is recorded"
+
+echo "idempotent payment replay"
+invoice_paid_again="$(api "$FRONT_TOKEN" -X POST "$BASE_URL/api/billing/invoices/$invoice_id/pay" \
+  -H "X-Meridian-Captured-At: $captured_at")"
+assert_eq "$(jq -r '.status' <<<"$invoice_paid_again")" "paid" "payment replay stays paid"
+assert_eq "$(jq -r '.paidBy' <<<"$invoice_paid_again")" "frontdesk" "payment replay keeps the actor"
 
 echo "pharmacy"
 item_sku="AMOX-${patient_id:0:8}"

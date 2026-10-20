@@ -17,6 +17,7 @@ trail.
 - Read a small FHIR R4 facade for patients, encounters, observations, and reports.
 - Create a local visit invoice, add charges, and mark it paid.
 - Track pharmacy stock, adjust inventory, and record dispenses.
+- Queue front-desk and billing changes while the API is offline, then replay them.
 - Keep every mutation in a facility-scoped hash chain and verify the chain.
 - Isolate all reads and writes by facility.
 
@@ -106,6 +107,11 @@ All `/api/**` routes except `/api/health` require a bearer token.
 The lab lifecycle is `ordered -> collected -> resulted -> released`. Invalid
 transitions return `409`; unknown or cross-facility records return `404`.
 
+Patient, encounter, invoice, and charge creates accept an optional client-supplied
+`id`. All offline-capable writes accept an optional `X-Meridian-Captured-At`
+ISO-8601 header. Replaying the same create returns the existing record without a
+second audit entry. Reusing an id with different data returns `409`.
+
 A released result is amended by appending to `lab_result_amendments`, keeping
 the previous value, unit, reference range, and a required reason. The current
 result and the audit chain both reflect the amendment.
@@ -171,6 +177,33 @@ tracking, or external pharmacy feeds.
 
 Both modules are facility-scoped and audited like the rest of the workspace.
 
+## Offline front desk
+
+The front desk and billing views keep an IndexedDB cache and outbox. While the
+API is unreachable, patient registration, encounters, invoices, charges, and
+payments are saved locally and replayed in order when the connection returns.
+The header shows online/offline state, pending or failed queue items, and a
+`Sync now` action. Pending records are marked in the UI.
+
+Idempotency relies on client-generated UUIDs, so replaying an outbox item cannot
+duplicate a patient, encounter, invoice, or charge, and paying twice as the same
+actor returns the existing paid invoice. `X-Meridian-Captured-At` records the
+original capture time in the audit payload. No schema migration is required.
+
+Scope and limits:
+
+- Offline mode works only inside an active authenticated session. Access and
+  refresh tokens are not persisted, so there is no offline cold start.
+- Only front-desk and billing writes are queued. Lab, pharmacy, HL7, FHIR, and
+  audit remain online-only.
+- Cached patients, encounters, and invoices are demo data. Do not store real PHI
+  in the browser cache.
+- Signing out clears the local cache and outbox after confirmation.
+- There is no service worker or background sync in this slice; replay runs while
+  the app is open and the browser reports a connection.
+
+See `docs/adr/0008-offline-sync.md` and `docs/offline-sync-plan.md`.
+
 ## Test
 
 ```bash
@@ -180,8 +213,8 @@ make smoke
 
 `make test` runs Maven through Docker. `make smoke` needs the stack running plus
 `curl` and `jq`; it obtains tokens for each role, exercises the clinical, HL7,
-billing, and pharmacy flows against PostgreSQL, checks unauthorized and forbidden
-requests, verifies the audit chain, and checks facility isolation. It is safe to
+billing, and pharmacy flows against PostgreSQL, checks offline idempotency and
+conflicts, verifies the audit chain, and checks facility isolation. It is safe to
 run repeatedly.
 
 ## Audit design
@@ -204,7 +237,7 @@ src/main/java/com/meridian/core/    service, models, audit chain
 src/main/java/com/meridian/api/     HTTP controllers and error mapping
 src/main/java/com/meridian/fhir/    read-only FHIR facade
 src/main/java/com/meridian/interop/ HL7 parsing and ACK support
-src/main/resources/static/          clinic workspace UI and vendored Keycloak JS
+src/main/resources/static/          clinic UI, offline cache/outbox, vendored Keycloak JS
 src/main/resources/db/migration/    Flyway migrations and seed data
 src/test/java/com/meridian/         tests
 keycloak/                           demo realm, users, roles, and clients

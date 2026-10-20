@@ -9,6 +9,7 @@ import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 import org.springframework.dao.DuplicateKeyException;
@@ -59,34 +60,56 @@ public class MeridianService {
     public Patient registerPatient(
             UUID facilityId,
             String actorId,
+            UUID requestedId,
             String givenName,
             String familyName,
             LocalDate dateOfBirth,
-            String phone) {
+            String phone,
+            Instant capturedAt) {
         requireText(givenName, "givenName is required");
         requireText(familyName, "familyName is required");
         requireFacility(facilityId);
 
+        UUID patientId = requestedId == null ? UUID.randomUUID() : requestedId;
+        String normalizedGivenName = givenName.trim();
+        String normalizedFamilyName = familyName.trim();
+
+        Patient existing = findPatient(facilityId, patientId);
+        if (existing != null) {
+            return requireSamePatient(existing, normalizedGivenName, normalizedFamilyName, dateOfBirth, phone);
+        }
+
         MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("id", patientId)
                 .addValue("facilityId", facilityId)
-                .addValue("givenName", givenName.trim())
-                .addValue("familyName", familyName.trim())
+                .addValue("givenName", normalizedGivenName)
+                .addValue("familyName", normalizedFamilyName)
                 .addValue("dob", dateOfBirth, Types.DATE)
                 .addValue("phone", phone);
 
-        Patient patient = jdbc.queryForObject(
-                """
-                INSERT INTO patients (facility_id, given_name, family_name, date_of_birth, phone)
-                VALUES (:facilityId, :givenName, :familyName, :dob, :phone)
-                RETURNING id, facility_id, given_name, family_name, date_of_birth, phone, created_at
-                """,
-                params,
-                patientRow());
+        Patient patient;
+        try {
+            patient = jdbc.queryForObject(
+                    """
+                    INSERT INTO patients (id, facility_id, given_name, family_name, date_of_birth, phone)
+                    VALUES (:id, :facilityId, :givenName, :familyName, :dob, :phone)
+                    RETURNING id, facility_id, given_name, family_name, date_of_birth, phone, created_at
+                    """,
+                    params,
+                    patientRow());
+        } catch (DuplicateKeyException exception) {
+            Patient raced = findPatient(facilityId, patientId);
+            if (raced != null) {
+                return requireSamePatient(raced, normalizedGivenName, normalizedFamilyName, dateOfBirth, phone);
+            }
+            throw new ConflictException("patient id is already in use");
+        }
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("given_name", patient.givenName());
         payload.put("family_name", patient.familyName());
         payload.put("date_of_birth", patient.dateOfBirth());
+        addOfflineMetadata(payload, capturedAt);
         audit(facilityId, actorId, "patient.registered", "patient", patient.id(), payload);
         return patient;
     }
@@ -103,6 +126,14 @@ public class MeridianService {
                 """,
                 params,
                 patientRow());
+    }
+
+    private Patient findPatient(UUID facilityId, UUID patientId) {
+        try {
+            return getPatient(facilityId, patientId);
+        } catch (NotFoundException | EmptyResultDataAccessException exception) {
+            return null;
+        }
     }
 
     public List<Patient> searchPatients(UUID facilityId, String query) {
@@ -127,33 +158,56 @@ public class MeridianService {
     public Encounter createEncounter(
             UUID facilityId,
             String actorId,
+            UUID requestedId,
             UUID patientId,
             String clinicianId,
             String notes,
-            JsonNode vitals) {
+            JsonNode vitals,
+            Instant capturedAt) {
         requireText(clinicianId, "clinicianId is required");
         getPatient(facilityId, patientId);
-        String vitalsJson = writeJson(vitals == null ? objectMapper.createObjectNode() : vitals);
+        String normalizedClinicianId = clinicianId.trim();
+        JsonNode normalizedVitals = vitals == null ? objectMapper.createObjectNode() : vitals;
+        String vitalsJson = writeJson(normalizedVitals);
+
+        UUID encounterId = requestedId == null ? UUID.randomUUID() : requestedId;
+        Encounter existing = findEncounter(facilityId, encounterId);
+        if (existing != null) {
+            return requireSameEncounter(
+                    existing, patientId, normalizedClinicianId, notes, normalizedVitals);
+        }
 
         MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("id", encounterId)
                 .addValue("facilityId", facilityId)
                 .addValue("patientId", patientId)
-                .addValue("clinicianId", clinicianId.trim())
+                .addValue("clinicianId", normalizedClinicianId)
                 .addValue("notes", notes)
                 .addValue("vitals", vitalsJson);
 
-        Encounter encounter = jdbc.queryForObject(
-                """
-                INSERT INTO encounters (facility_id, patient_id, clinician_id, notes, vitals)
-                VALUES (:facilityId, :patientId, :clinicianId, :notes, :vitals::jsonb)
-                RETURNING id, facility_id, patient_id, clinician_id, notes, vitals, created_at
-                """,
-                params,
-                encounterRow());
+        Encounter encounter;
+        try {
+            encounter = jdbc.queryForObject(
+                    """
+                    INSERT INTO encounters (id, facility_id, patient_id, clinician_id, notes, vitals)
+                    VALUES (:id, :facilityId, :patientId, :clinicianId, :notes, :vitals::jsonb)
+                    RETURNING id, facility_id, patient_id, clinician_id, notes, vitals, created_at
+                    """,
+                    params,
+                    encounterRow());
+        } catch (DuplicateKeyException exception) {
+            Encounter raced = findEncounter(facilityId, encounterId);
+            if (raced != null) {
+                return requireSameEncounter(
+                        raced, patientId, normalizedClinicianId, notes, normalizedVitals);
+            }
+            throw new ConflictException("encounter id is already in use");
+        }
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("patient_id", patientId);
         payload.put("clinician_id", encounter.clinicianId());
+        addOfflineMetadata(payload, capturedAt);
         audit(facilityId, actorId, "encounter.created", "encounter", encounter.id(), payload);
         return encounter;
     }
@@ -170,6 +224,14 @@ public class MeridianService {
                 """,
                 params,
                 encounterRow());
+    }
+
+    private Encounter findEncounter(UUID facilityId, UUID encounterId) {
+        try {
+            return getEncounter(facilityId, encounterId);
+        } catch (NotFoundException | EmptyResultDataAccessException exception) {
+            return null;
+        }
     }
 
     public List<Encounter> listEncounters(UUID facilityId, UUID patientId) {
@@ -496,12 +558,26 @@ public class MeridianService {
     }
 
     @Transactional
-    public BillingInvoice createInvoice(UUID facilityId, String actorId, UUID encounterId) {
+    public BillingInvoice createInvoice(
+            UUID facilityId,
+            String actorId,
+            UUID requestedId,
+            UUID encounterId,
+            Instant capturedAt) {
         if (encounterId == null) {
             throw new BadRequestException("encounterId is required");
         }
         Encounter encounter = getEncounter(facilityId, encounterId);
-        UUID invoiceId = UUID.randomUUID();
+        UUID invoiceId = requestedId == null ? UUID.randomUUID() : requestedId;
+
+        BillingInvoice existing = findInvoice(facilityId, invoiceId);
+        if (existing != null) {
+            if (!encounterId.equals(existing.encounterId())) {
+                throw new ConflictException("invoice id is already in use");
+            }
+            return existing;
+        }
+
         try {
             jdbc.update(
                     """
@@ -517,12 +593,17 @@ public class MeridianService {
                             .addValue("patientId", encounter.patientId())
                             .addValue("createdBy", actorId));
         } catch (DuplicateKeyException exception) {
+            BillingInvoice raced = findInvoice(facilityId, invoiceId);
+            if (raced != null && encounterId.equals(raced.encounterId())) {
+                return raced;
+            }
             throw new ConflictException("this encounter already has an invoice");
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("encounter_id", encounterId.toString());
         payload.put("patient_id", encounter.patientId().toString());
+        addOfflineMetadata(payload, capturedAt);
         audit(facilityId, actorId, "billing_invoice.created", "billing_invoice", invoiceId, payload);
         return getInvoice(facilityId, invoiceId);
     }
@@ -570,6 +651,31 @@ public class MeridianService {
                 charges);
     }
 
+    private BillingInvoice findInvoice(UUID facilityId, UUID invoiceId) {
+        try {
+            return getInvoice(facilityId, invoiceId);
+        } catch (NotFoundException exception) {
+            return null;
+        }
+    }
+
+    private BillingCharge findCharge(UUID facilityId, UUID chargeId) {
+        try {
+            return jdbc.queryForObject(
+                    """
+                    SELECT id, invoice_id, description, amount_cents, created_by, created_at
+                    FROM billing_charges
+                    WHERE facility_id = :facilityId AND id = :chargeId
+                    """,
+                    new MapSqlParameterSource()
+                            .addValue("facilityId", facilityId)
+                            .addValue("chargeId", chargeId),
+                    billingChargeRow());
+        } catch (EmptyResultDataAccessException exception) {
+            return null;
+        }
+    }
+
     public List<BillingInvoice> listInvoices(UUID facilityId, String status, UUID patientId) {
         StringBuilder sql = new StringBuilder(INVOICE_SELECT);
         MapSqlParameterSource params = new MapSqlParameterSource().addValue("facilityId", facilityId);
@@ -590,43 +696,68 @@ public class MeridianService {
     public BillingInvoice addCharge(
             UUID facilityId,
             String actorId,
+            UUID requestedId,
             UUID invoiceId,
             String description,
-            long amountCents) {
+            long amountCents,
+            Instant capturedAt) {
         requireText(description, "description is required");
         if (amountCents <= 0) {
             throw new BadRequestException("amountCents must be greater than zero");
         }
+        String normalizedDescription = description.trim();
+        UUID chargeId = requestedId == null ? UUID.randomUUID() : requestedId;
+
+        BillingCharge existing = findCharge(facilityId, chargeId);
+        if (existing != null) {
+            return requireSameCharge(existing, invoiceId, normalizedDescription, amountCents, facilityId);
+        }
+
         String status = lockInvoiceStatus(facilityId, invoiceId);
         requireStatus(status, "open", "charges can only be added to an open invoice");
 
-        UUID chargeId = UUID.randomUUID();
-        jdbc.update(
-                """
-                INSERT INTO billing_charges
-                    (id, facility_id, invoice_id, description, amount_cents, created_by)
-                VALUES
-                    (:id, :facilityId, :invoiceId, :description, :amountCents, :createdBy)
-                """,
-                new MapSqlParameterSource()
-                        .addValue("id", chargeId)
-                        .addValue("facilityId", facilityId)
-                        .addValue("invoiceId", invoiceId)
-                        .addValue("description", description.trim())
-                        .addValue("amountCents", amountCents)
-                        .addValue("createdBy", actorId));
+        try {
+            jdbc.update(
+                    """
+                    INSERT INTO billing_charges
+                        (id, facility_id, invoice_id, description, amount_cents, created_by)
+                    VALUES
+                        (:id, :facilityId, :invoiceId, :description, :amountCents, :createdBy)
+                    """,
+                    new MapSqlParameterSource()
+                            .addValue("id", chargeId)
+                            .addValue("facilityId", facilityId)
+                            .addValue("invoiceId", invoiceId)
+                            .addValue("description", normalizedDescription)
+                            .addValue("amountCents", amountCents)
+                            .addValue("createdBy", actorId));
+        } catch (DuplicateKeyException exception) {
+            BillingCharge raced = findCharge(facilityId, chargeId);
+            if (raced != null) {
+                return requireSameCharge(raced, invoiceId, normalizedDescription, amountCents, facilityId);
+            }
+            throw new ConflictException("charge id is already in use");
+        }
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("invoice_id", invoiceId.toString());
-        payload.put("description", description.trim());
+        payload.put("description", normalizedDescription);
         payload.put("amount_cents", amountCents);
+        addOfflineMetadata(payload, capturedAt);
         audit(facilityId, actorId, "billing_charge.added", "billing_charge", chargeId, payload);
         return getInvoice(facilityId, invoiceId);
     }
 
     @Transactional
-    public BillingInvoice payInvoice(UUID facilityId, String actorId, UUID invoiceId) {
+    public BillingInvoice payInvoice(UUID facilityId, String actorId, UUID invoiceId, Instant capturedAt) {
         String status = lockInvoiceStatus(facilityId, invoiceId);
+        if ("paid".equals(status)) {
+            BillingInvoice paid = getInvoice(facilityId, invoiceId);
+            if (Objects.equals(actorId, paid.paidBy())) {
+                return paid;
+            }
+            throw new ConflictException("invoice was already paid by another user");
+        }
         requireStatus(status, "open", "only an open invoice can be paid");
 
         Long total = jdbc.queryForObject(
@@ -652,8 +783,10 @@ public class MeridianService {
                         .addValue("facilityId", facilityId)
                         .addValue("invoiceId", invoiceId)
                         .addValue("paidBy", actorId));
-        audit(facilityId, actorId, "billing_invoice.paid", "billing_invoice", invoiceId,
-                Map.of("total_cents", total));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("total_cents", total);
+        addOfflineMetadata(payload, capturedAt);
+        audit(facilityId, actorId, "billing_invoice.paid", "billing_invoice", invoiceId, payload);
         return getInvoice(facilityId, invoiceId);
     }
 
@@ -1003,6 +1136,60 @@ public class MeridianService {
     private static void requireStatus(String actual, String expected, String message) {
         if (!expected.equals(actual)) {
             throw new ConflictException(message + " (status is " + actual + ")");
+        }
+    }
+
+    private static Patient requireSamePatient(
+            Patient existing,
+            String givenName,
+            String familyName,
+            LocalDate dateOfBirth,
+            String phone) {
+        boolean same = Objects.equals(existing.givenName(), givenName)
+                && Objects.equals(existing.familyName(), familyName)
+                && Objects.equals(existing.dateOfBirth(), dateOfBirth)
+                && Objects.equals(existing.phone(), phone);
+        if (!same) {
+            throw new ConflictException("patient id is already in use with different data");
+        }
+        return existing;
+    }
+
+    private static Encounter requireSameEncounter(
+            Encounter existing,
+            UUID patientId,
+            String clinicianId,
+            String notes,
+            JsonNode vitals) {
+        boolean same = Objects.equals(existing.patientId(), patientId)
+                && Objects.equals(existing.clinicianId(), clinicianId)
+                && Objects.equals(existing.notes(), notes)
+                && Objects.equals(existing.vitals(), vitals);
+        if (!same) {
+            throw new ConflictException("encounter id is already in use with different data");
+        }
+        return existing;
+    }
+
+    private BillingInvoice requireSameCharge(
+            BillingCharge existing,
+            UUID invoiceId,
+            String description,
+            long amountCents,
+            UUID facilityId) {
+        boolean same = Objects.equals(existing.invoiceId(), invoiceId)
+                && Objects.equals(existing.description(), description)
+                && existing.amountCents() == amountCents;
+        if (!same) {
+            throw new ConflictException("charge id is already in use with different data");
+        }
+        return getInvoice(facilityId, invoiceId);
+    }
+
+    private static void addOfflineMetadata(Map<String, Object> payload, Instant capturedAt) {
+        if (capturedAt != null) {
+            payload.put("source", "offline");
+            payload.put("captured_at", capturedAt.toString());
         }
     }
 

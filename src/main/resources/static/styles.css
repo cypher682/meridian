@@ -217,6 +217,26 @@ a {
   background: var(--red);
 }
 
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sync-badge[data-state="failed"] {
+  border-color: var(--red);
+  color: var(--red);
+}
+
 .layout {
   display: grid;
   grid-template-columns: 226px minmax(0, 1fr);

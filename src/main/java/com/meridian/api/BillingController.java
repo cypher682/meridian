@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -46,9 +47,15 @@ public class BillingController {
     @PreAuthorize("hasAnyRole('FRONT_DESK', 'ADMIN')")
     public BillingInvoice create(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody CreateInvoiceRequest request) {
+            @RequestBody CreateInvoiceRequest request,
+            @RequestHeader(value = "X-Meridian-Captured-At", required = false) String capturedAtHeader) {
         ApiScope.RequestScope scope = ApiScope.from(jwt);
-        return service.createInvoice(scope.facilityId(), scope.actorId(), request.encounterId());
+        return service.createInvoice(
+                scope.facilityId(),
+                scope.actorId(),
+                request.id(),
+                request.encounterId(),
+                OfflineMetadata.capturedAt(capturedAtHeader));
     }
 
     @PostMapping("/{id}/charges")
@@ -56,22 +63,34 @@ public class BillingController {
     public BillingInvoice addCharge(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
-            @RequestBody AddChargeRequest request) {
+            @RequestBody AddChargeRequest request,
+            @RequestHeader(value = "X-Meridian-Captured-At", required = false) String capturedAtHeader) {
         ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.addCharge(
-                scope.facilityId(), scope.actorId(), id, request.description(), request.amountCents());
+                scope.facilityId(),
+                scope.actorId(),
+                request.id(),
+                id,
+                request.description(),
+                request.amountCents(),
+                OfflineMetadata.capturedAt(capturedAtHeader));
     }
 
     @PostMapping("/{id}/pay")
     @PreAuthorize("hasAnyRole('FRONT_DESK', 'ADMIN')")
     public BillingInvoice pay(
             @AuthenticationPrincipal Jwt jwt,
-            @PathVariable UUID id) {
+            @PathVariable UUID id,
+            @RequestHeader(value = "X-Meridian-Captured-At", required = false) String capturedAtHeader) {
         ApiScope.RequestScope scope = ApiScope.from(jwt);
-        return service.payInvoice(scope.facilityId(), scope.actorId(), id);
+        return service.payInvoice(
+                scope.facilityId(),
+                scope.actorId(),
+                id,
+                OfflineMetadata.capturedAt(capturedAtHeader));
     }
 
-    public record CreateInvoiceRequest(UUID encounterId) {}
+    public record CreateInvoiceRequest(UUID id, UUID encounterId) {}
 
-    public record AddChargeRequest(String description, long amountCents) {}
+    public record AddChargeRequest(UUID id, String description, long amountCents) {}
 }
