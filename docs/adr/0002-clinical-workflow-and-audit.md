@@ -22,7 +22,8 @@ extend without rewriting the core.
 - Keep results in `lab_results` with one row per lab order. A result starts
   unreleased and records `released_by` and `released_at` only on release.
 - Scope every read and write by `facility_id`. The API takes `X-Facility-ID`
-  and defaults to the seeded demo facility for local use.
+  and defaults to the seeded demo facility for local use. (Superseded by
+  ADR-0003: facility and actor now come from OIDC token claims.)
 - Append every mutation to `audit_log` in the same transaction as the data
   change. The entry hash is
   `SHA256(prev_hash | facility_id | actor_id | action | entity_type | entity_id | payload)`.

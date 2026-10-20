@@ -2,31 +2,35 @@ package com.meridian.api;
 
 import java.util.UUID;
 
-import com.meridian.core.BadRequestException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.oauth2.jwt.Jwt;
 
 public final class ApiScope {
-
-    private static final UUID DEFAULT_FACILITY_ID =
-            UUID.fromString("00000000-0000-0000-0000-000000000001");
-    private static final String DEFAULT_ACTOR_ID = "demo-user";
 
     private ApiScope() {
     }
 
-    public static RequestScope resolve(String facilityHeader, String actorHeader) {
-        UUID facilityId;
-        if (facilityHeader == null || facilityHeader.isBlank()) {
-            facilityId = DEFAULT_FACILITY_ID;
-        } else {
-            try {
-                facilityId = UUID.fromString(facilityHeader.trim());
-            } catch (IllegalArgumentException error) {
-                throw new BadRequestException("X-Facility-ID must be a UUID");
-            }
+    public static RequestScope from(Jwt jwt) {
+        String facilityClaim = jwt.getClaimAsString("facility_id");
+        if (facilityClaim == null || facilityClaim.isBlank()) {
+            throw new AccessDeniedException("facility claim is missing");
         }
-        String actorId = actorHeader == null || actorHeader.isBlank()
-                ? DEFAULT_ACTOR_ID
-                : actorHeader.trim();
+
+        UUID facilityId;
+        try {
+            facilityId = UUID.fromString(facilityClaim.trim());
+        } catch (IllegalArgumentException error) {
+            throw new AccessDeniedException("facility claim must be a UUID");
+        }
+
+        String actorId = jwt.getClaimAsString("preferred_username");
+        if (actorId == null || actorId.isBlank()) {
+            actorId = jwt.getSubject();
+        }
+        if (actorId == null || actorId.isBlank()) {
+            throw new AccessDeniedException("actor claim is missing");
+        }
+
         return new RequestScope(facilityId, actorId);
     }
 

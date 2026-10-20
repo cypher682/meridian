@@ -9,6 +9,10 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <div id="auth-gate" class="auth-gate" role="status" aria-live="polite">
+    <p class="auth-gate-text">Signing in…</p>
+  </div>
+
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">M</span>
@@ -16,29 +20,37 @@
       <span class="brand-sub">Clinic records</span>
     </div>
     <div class="session">
-      <label for="actor">Acting as</label>
-      <input id="actor" name="actor" value="demo-user" autocomplete="off" spellcheck="false">
+      <span id="session-user" class="session-user" aria-live="polite"></span>
       <span id="connection" class="connection" data-state="checking">Checking</span>
+      <button id="sign-out" class="btn btn-quiet" type="button">Sign out</button>
     </div>
   </header>
 
   <div class="layout">
     <nav class="rail" aria-label="Workspace">
       <p class="rail-label">Workflow</p>
-      <button class="nav-item is-active" type="button" data-view="front">
+      <button class="nav-item is-active" type="button" data-view="front" data-roles="front_desk,admin">
         <span class="step">01</span>
         <span>Front desk</span>
       </button>
-      <button class="nav-item" type="button" data-view="clinician">
+      <button class="nav-item" type="button" data-view="clinician" data-roles="clinician,admin">
         <span class="step">02</span>
         <span>Clinician</span>
       </button>
-      <button class="nav-item" type="button" data-view="lab">
+      <button class="nav-item" type="button" data-view="lab" data-roles="lab,admin">
         <span class="step">03</span>
         <span>Laboratory</span>
       </button>
+      <button class="nav-item" type="button" data-view="billing" data-roles="front_desk,admin">
+        <span class="step">04</span>
+        <span>Billing</span>
+      </button>
+      <button class="nav-item" type="button" data-view="pharmacy" data-roles="pharmacist,admin">
+        <span class="step">05</span>
+        <span>Pharmacy</span>
+      </button>
       <div class="rail-spacer"></div>
-      <button class="nav-item" type="button" data-view="audit">
+      <button class="nav-item" type="button" data-view="audit" data-roles="auditor,admin">
         <span class="step">A</span>
         <span>Audit log</span>
       </button>
@@ -249,6 +261,141 @@
         </div>
       </section>
 
+      <section id="view-billing" class="view" aria-labelledby="billing-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Revenue</p>
+            <h1 id="billing-title">Visit billing</h1>
+            <p class="view-intro">Create one invoice per encounter, add visit charges, and mark it paid. This is a local demo ledger, not a claims submission.</p>
+          </div>
+          <button id="billing-refresh" class="btn btn-secondary" type="button">Refresh invoices</button>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Invoices</h2>
+              <span id="billing-count" class="count"></span>
+            </div>
+            <form id="billing-invoice-form" class="panel-inset">
+              <h3>New invoice</h3>
+              <p id="billing-encounter-note" class="form-note">Open a patient chart at the front desk first.</p>
+              <label>Encounter
+                <select id="billing-encounter" name="encounterId" required>
+                  <option value="">Select an encounter</option>
+                </select>
+              </label>
+              <div class="form-actions">
+                <button class="btn" type="submit">Create invoice</button>
+              </div>
+            </form>
+            <div id="billing-invoices" class="result-list">
+              <p class="empty">No invoices yet.</p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Invoice detail</h2>
+            </div>
+            <div id="billing-detail-body">
+              <p class="empty">Select an invoice to add charges or collect payment.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-pharmacy" class="view" aria-labelledby="pharmacy-title">
+        <div class="view-head">
+          <div>
+            <p class="view-kicker">Pharmacy</p>
+            <h1 id="pharmacy-title">Dispensary</h1>
+            <p class="view-intro">Track local stock, adjust inventory, and record dispenses against an encounter. No prescriptions or external pharmacy feed yet.</p>
+          </div>
+          <button id="pharmacy-refresh" class="btn btn-secondary" type="button">Refresh stock</button>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Stock</h2>
+              <span id="pharmacy-count" class="count"></span>
+            </div>
+            <form id="pharmacy-item-form" class="panel-inset form-grid">
+              <h3>Add an item</h3>
+              <label>SKU
+                <input name="sku" required autocomplete="off" placeholder="AMOX500">
+              </label>
+              <label>Name
+                <input name="name" required autocomplete="off" placeholder="Amoxicillin">
+              </label>
+              <label>Unit
+                <input name="unit" autocomplete="off" placeholder="capsule">
+              </label>
+              <label>Starting stock
+                <input name="stockQuantity" type="number" min="0" step="1" value="0">
+              </label>
+              <label>Reorder level
+                <input name="reorderLevel" type="number" min="0" step="1" value="0">
+              </label>
+              <div class="form-actions">
+                <button class="btn" type="submit">Add item</button>
+              </div>
+            </form>
+            <div id="pharmacy-items" class="result-list">
+              <p class="empty">No pharmacy items yet.</p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Dispense</h2>
+            </div>
+            <form id="dispense-form" class="form-stack">
+              <p id="dispense-encounter-note" class="form-note">Open a patient chart at the front desk first.</p>
+              <label>Encounter
+                <select id="dispense-encounter" name="encounterId" required>
+                  <option value="">Select an encounter</option>
+                </select>
+              </label>
+              <label>Item
+                <select id="dispense-item" name="itemId" required>
+                  <option value="">Select an item</option>
+                </select>
+              </label>
+              <label>Quantity
+                <input name="quantity" type="number" min="1" step="1" value="1" required>
+              </label>
+              <div class="form-actions">
+                <button class="btn" type="submit">Record dispense</button>
+              </div>
+            </form>
+
+            <form id="stock-form" class="panel-inset form-stack">
+              <h3>Adjust stock</h3>
+              <label>Item
+                <select id="stock-item" name="itemId" required>
+                  <option value="">Select an item</option>
+                </select>
+              </label>
+              <label>Change
+                <input name="delta" type="number" step="1" required placeholder="10 or -1">
+              </label>
+              <div class="form-actions">
+                <button class="btn btn-secondary" type="submit">Apply change</button>
+              </div>
+            </form>
+
+            <div class="panel-inset">
+              <h3>Recent dispenses</h3>
+              <div id="dispense-list" class="result-list">
+                <p class="empty">No dispenses yet.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <section id="view-audit" class="view" aria-labelledby="audit-title">
         <div class="view-head">
           <div>
@@ -282,11 +429,20 @@
           </table>
         </div>
       </section>
+
+      <section id="view-denied" class="view" aria-labelledby="denied-title">
+        <div class="empty-state">
+          <p class="view-kicker">Access</p>
+          <h1 id="denied-title">This view is not available</h1>
+          <p>Your account does not have the role required for this part of the clinic workspace.</p>
+          <button id="denied-back" class="btn btn-secondary" type="button">Go to my workspace</button>
+        </div>
+      </section>
     </main>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

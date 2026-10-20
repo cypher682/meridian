@@ -1,6 +1,19 @@
 name: meridian
 
 services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: meridian
+      KC_HOSTNAME: http://localhost:8084
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8084:8080"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+
   db:
     image: postgres:16-alpine
     environment:
@@ -27,6 +40,8 @@ services:
       DATABASE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-meridian}
       DATABASE_USER: ${POSTGRES_USER:-meridian}
       DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-meridian}
+      OIDC_ISSUER_URI: http://localhost:8084/realms/meridian
+      OIDC_JWK_SET_URI: http://keycloak:8080/realms/meridian/protocol/openid-connect/certs
     ports:
       - "8083:8080"
 

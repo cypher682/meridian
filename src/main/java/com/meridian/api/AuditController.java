@@ -2,8 +2,10 @@ package com.meridian.api;
 
 import java.util.List;
 
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -23,17 +25,19 @@ public class AuditController {
     }
 
     @GetMapping
+    @PreAuthorize("hasAnyRole('AUDITOR','ADMIN')")
     public List<AuditEntry> list(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader,
+            @AuthenticationPrincipal Jwt jwt,
             @RequestParam(value = "limit", defaultValue = "50") int limit) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, null);
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.listAudit(scope.facilityId(), limit);
     }
 
     @GetMapping("/verify")
+    @PreAuthorize("hasAnyRole('AUDITOR','ADMIN')")
     public AuditVerification verify(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, null);
+            @AuthenticationPrincipal Jwt jwt) {
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.verifyAudit(scope.facilityId());
     }
 }

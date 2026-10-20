@@ -1,0 +1,159 @@
+{
+  "realm": "meridian",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "front_desk" },
+      { "name": "clinician" },
+      { "name": "lab" },
+      { "name": "pharmacist" },
+      { "name": "auditor" },
+      { "name": "admin" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "meridian-ui",
+      "name": "Meridian clinic workspace",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["http://localhost:8083/*"],
+      "webOrigins": ["http://localhost:8083"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8083/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "facility_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "facility_id",
+            "claim.name": "facility_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "meridian-cli",
+      "name": "Meridian test client",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "fullScopeAllowed": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocolMappers": [
+        {
+          "name": "facility_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "facility_id",
+            "claim.name": "facility_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["front_desk", "clinician", "lab", "pharmacist", "auditor", "admin"]
+    },
+    {
+      "username": "frontdesk",
+      "enabled": true,
+      "email": "frontdesk@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Front Desk",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["front_desk"]
+    },
+    {
+      "username": "clinician",
+      "enabled": true,
+      "email": "clinician@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Clinician",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["clinician"]
+    },
+    {
+      "username": "lab",
+      "enabled": true,
+      "email": "lab@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Lab",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["lab"]
+    },
+    {
+      "username": "pharmacist",
+      "enabled": true,
+      "email": "pharmacist@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Pharmacist",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["pharmacist"]
+    },
+    {
+      "username": "auditor",
+      "enabled": true,
+      "email": "auditor@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Auditor",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000001"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["auditor"]
+    },
+    {
+      "username": "otherfacility",
+      "enabled": true,
+      "email": "otherfacility@meridian.test",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Other Facility",
+      "attributes": { "facility_id": ["00000000-0000-0000-0000-000000000099"] },
+      "credentials": [{ "type": "password", "value": "meridian", "temporary": false }],
+      "realmRoles": ["front_desk"]
+    }
+  ]
+}

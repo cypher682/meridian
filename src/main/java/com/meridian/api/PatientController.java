@@ -4,11 +4,13 @@ import java.util.List;
 import java.util.UUID;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -30,11 +32,11 @@ public class PatientController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasAnyRole('FRONT_DESK','ADMIN')")
     public Patient register(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader,
-            @RequestHeader(value = "X-Actor-ID", required = false) String actorHeader,
+            @AuthenticationPrincipal Jwt jwt,
             @RequestBody RegisterPatientRequest request) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, actorHeader);
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.registerPatient(
                 scope.facilityId(),
                 scope.actorId(),
@@ -46,25 +48,25 @@ public class PatientController {
 
     @GetMapping("/{id}")
     public Patient get(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader,
+            @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, null);
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.getPatient(scope.facilityId(), id);
     }
 
     @GetMapping
     public List<Patient> search(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader,
+            @AuthenticationPrincipal Jwt jwt,
             @RequestParam(value = "q", defaultValue = "") String query) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, null);
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.searchPatients(scope.facilityId(), query);
     }
 
     @GetMapping("/{id}/encounters")
     public List<Encounter> encounters(
-            @RequestHeader(value = "X-Facility-ID", required = false) String facilityHeader,
+            @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        ApiScope.RequestScope scope = ApiScope.resolve(facilityHeader, null);
+        ApiScope.RequestScope scope = ApiScope.from(jwt);
         return service.listEncounters(scope.facilityId(), id);
     }
 }
